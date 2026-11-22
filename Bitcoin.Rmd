@@ -1,0 +1,255 @@
+```{r}
+library(rugarch)
+library(yfR)
+library(shiny)
+library(shinydashboard)
+library(shinymeta)
+library(shinyWidgets)
+library(shinythemes)
+library(shinyjs)
+```
+
+```{r}
+get_data = function(tickers = "BTC-USD", first_date = "2013-01-01",
+                    last_date = (Sys.Date())){
+  data = yf_get(tickers, first_date, last_date)
+  data = na.omit(data[,c(2,8,9)])
+  colnames(data) = c("date", "adjusted", "ret_adjusted")
+  return(data)
+}
+
+get_prev_model = function(dados, modelo, params, distribution = "norm", h = 5){
+    sequencia = seq(from = max(dados$date)+1, by = 1, length.out = 5)
+    dados = na.omit(dados)
+    dados$index = 1:nrow(dados)
+
+    ts_df = as_tsibble(dados, index = index)
+    
+    spec = ugarchspec(mean.model = list(armaOrder = params[1:2],
+                                        include.mean = FALSE),
+                      variance.model = list(model = 'sGARCH', garchOrder = params[3:4]),
+                      distribution.model = distribution)
+    modelo =  ugarchfit(spec, dados$ret_adjusted, solver = 'hybrid')
+    
+    prev = ugarchforecast(modelo, n.ahead = h)
+    prev = cbind(prev@forecast$seriesFor, prev@forecast$sigmaFor)
+    rownames(prev) = NULL
+    prev = as.data.frame(prev)
+    prev$index= sequencia
+    colnames(prev) = c("Retorno", "Desvio padrão", "idx")
+
+    return(list(prev, modelo))
+}
+
+#### CONSEGUIR GRAFICOS DE DIAGNOSTICO DO MODELO ########################################################
+get_graph_model = function(dados, modelo, params, distribution = "norm", h = 5){
+  testeGarch = modelo
+  
+  infos = get_prev_model(dados = dados, modelo = modelo, params = params,
+                         distribution = distribution, h = h)
+  prev = infos[[1]]
+  modelo = infos[[2]]
+  if(testeGarch == "ARMA_GARCH"){
+    residuos = fGarch::residuals(modelo, standardize = TRUE)
+    residuosqq = modelo@fit$residuals
+  }
+  else{
+    residuos = modelo$residuals
+  }
+  aux <- data.frame(idx = 1:length(residuos),
+                    res = residuos)
+  
+  plot_seq <- ggplot(aux, aes(x = idx, y = res))+
+    geom_line(color = "#33C481")+
+    geom_point(color = "#33C481")+
+    geom_hline(aes(yintercept = 0),
+               color = "white", linetype =2)+
+    labs(title = "Gráfico de Sequência dos Resíduos")+
+    theme_bw()+
+    meu_tema
+  
+  acf <- acf(aux$res, plot = F) 
+  acf <- data.frame(idx = factor(seq(1,length(acf$acf[,,1]))),
+                    acf = acf$acf[,,1])
+  acf <- ggplot(acf)+
+    geom_segment(aes(x = idx, xend = idx, y = 0, yend=acf),
+                     color = "white", size = 1)+
+    geom_hline(aes(yintercept = 0), color = "white")+
+    geom_hline(data = data.frame(nrow = nrow(dados)),
+               aes(yintercept = 1.96/sqrt(nrow)), 
+               color = "#33C481", linetype = 2)+
+    geom_hline(data = data.frame(nrow = nrow(dados)),
+               aes(yintercept = -1.96/sqrt(nrow)), 
+               color = "#33C481",linetype = 2)+
+    labs(title = "ACF dos Resíduos")+
+    theme_bw()+
+    meu_tema+ 
+    scale_x_discrete(breaks = seq(0,35, by=5))
+  
+  acf2 <- acf(aux$res^2, plot = F)
+  acf2 <- data.frame(idx = factor(seq(1,length(acf2$acf[,,1]))),
+                     acf = acf2$acf[,,1])
+  acf2 <- ggplot(acf2)+
+    geom_segment(aes(x = idx, xend = idx, y = 0, yend=acf),
+                     color = "white", size = 1)+
+    geom_hline(aes(yintercept = 0), color = "white")+
+    geom_hline(data = data.frame(nrow = nrow(dados)),
+               aes(yintercept = 1.96/sqrt(nrow)), 
+               color = "#33C481", linetype = 2)+
+    geom_hline(data = data.frame(nrow = nrow(dados)),
+               aes(yintercept = -1.96/sqrt(nrow)), 
+               color = "#33C481",linetype = 2)+
+    labs(title = "ACF dos Resíduos ao Quadrado")+
+    theme_bw()+
+    meu_tema+
+    scale_x_discrete(breaks = seq(0,35, by=5))
+  
+  pacf <- pacf(aux$res)
+  pacf <- data.frame(idx = factor(seq(1,length(pacf$acf[,,1]))),
+                    pacf = pacf$acf[,,1])
+  pacf <- ggplot(pacf)+
+    geom_segment(aes(x = idx, xend = idx, y = 0, yend=pacf),
+                 color = "white")+
+    geom_hline(aes(yintercept = 0),color = "white")+
+    geom_hline(data = data.frame(nrow = nrow(dados)),aes(yintercept = 1.96/sqrt(nrow)),
+               color = "#33C481",linetype = 2)+
+      geom_hline(data = data.frame(nrow = nrow(dados)),aes(yintercept = -1.96/sqrt(nrow)),
+                 color = "#33C481", linetype = 2)+
+    labs(title = "PACF dos Resíduos")+
+    theme_bw()+
+    meu_tema+
+    scale_x_discrete(breaks = seq(0,35, by=5))
+
+  if(distribution == "norm"){
+    qqplot <- ggplot(aux, aes(sample = res))+
+      geom_qq(color = "white")+
+      geom_qq_line(color = "#33C481")+
+      labs(title = "QQplot do Resíduo (Normal)")+
+      theme_bw()+
+      meu_tema
+  }
+  if(distribution == "std"){
+    auxqq = aux
+    auxqq$res = residuosqq
+    qqplot <- ggplot(auxqq, aes(sample = res))+
+      geom_qq(distribution = qdist, dparams = c(distribution = "std",
+                  mu = mean(auxqq$res, na.rm = T),
+                  sigma = sd(auxqq$res, na.rm = T),
+                  skew = 0, shape = coef(modelo@fit)["shape"]),
+              color = "white")+
+      geom_qq_line(distribution = qdist, dparams = c(distribution = "std",
+                  mu = mean(auxqq$res),
+                  sigma = sd(auxqq$res),
+                  skew = 0, shape = coef(modelo@fit)["shape"]),
+                   color = "#33C481")+
+      labs(title = "QQplot do Resíduo (t-Student)")+
+      theme_bw()+
+      meu_tema
+    }
+  
+  hist_res <- ggplot(aux, aes(x = res))+
+    geom_histogram(fill = "white")+
+    labs(title = "Histograma do Resíduo (Normal)")+
+    meu_tema
+  
+  layoutgraf <- plot_layout(
+    widths = c(1,1,1),
+    heights = c(6,5,8)
+  )
+  
+  # plot(x,y, main = main, xlab = xlab, ylab = ylab, cex = 0.7)
+  # qqDist(y = zseries, dist = distribution, lambda = ghlambda, skew = skew, shape = shape)
+  
+  plot_grid <- (plot_seq)/(qqplot)/(acf+acf2+pacf)+layoutgraf
+  return(plot(plot_grid))
+}
+
+#data = get_data()
+
+```
+
+```{r}
+gen_rows = function(n, names, modelo){
+  string = paste0("column(width = 2, numericInput('", c("AR","MA", "GARCH1", "GARCH2"), 1:n,"', '",
+                  names,"', value = 0, min = 0))", collapse = ",")
+  string = paste0(string, ", column(width = 2, radioButtons('dist', label = h3('Distribuição'),
+                  choices = list('Normal' =  1, 'T-student' = 2), selected = 1))")
+  string = paste0("tagList(fluidRow(", string, ",
+                  actionButton('action', label = 'Avaliar Modelo')))")
+  x = eval(parse(text = string))
+  return(x)
+}
+
+tab_modelos <- column(12,
+                      h1("Modelos"),
+                      fluidRow(
+                        column(12,
+                               radioGroupButtons("modelo_nome", h2("Escolha seu modelo"),
+                                                choices = list("GARCH" = 1),
+                                                selected = 1, individual = TRUE,
+                                                direction = "horizontal", width = "50%"),
+                        )
+                      ),
+                      h2("Escolha seus parâmetros e Avalie o modelo"),
+                      uiOutput("modelo_user"),
+                      uiOutput("graficos_user")
+)
+
+ui <- fluidPage(dashboardPage(
+  dashboardHeader(title = "Séries Temporais"),
+  dashboardSidebar(
+    sidebarMenu(
+      id = "tabs",
+      menuItem("Modelos", tabName = "Modelos")
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      tabItem(tabName = "Modelos",
+              fluidPage(
+                fluidRow(
+                  tab_modelos
+                )
+              )
+      )))))
+
+#### SERVER DO DASHBOARD EM SHINY ##############################################
+server <- function(input, output, session) {
+  
+  n_params <- reactiveValues()
+  totalidade = reactiveValues()
+  parametros = reactiveValues()
+  paramComp = reactiveValues()
+  continue = reactiveValues()
+  
+  output$modelo_user <- renderUI({
+    inputs <- gen_rows(4, list("AR", "MA", "GARCH1", "GARCH2"), "ARMA_GARCH")
+    return(inputs)
+  })
+  
+  output$graficos_user <- renderUI({
+    id <- input$modelo_nome |> as.numeric()
+    string = paste0("input$", "ARMA_GARCH")
+    parametros$parametros <- eval(parse(text = paste0("c(",paste0(string, 1:10, collapse = ","), ")"))) |>
+      as.numeric() |> na.omit()
+    
+    totalidade$totalidade <- length(parametros$parametros)
+    
+    paramComp$paramComp = (totalidade$totalidade == n_params$n_params)
+    
+    if(paramComp$paramComp){
+      graficos_user <- plotOutput("graficos_user_plot")
+      return(graficos_user)
+    }
+    return(NULL)
+  })
+}
+```
+
+
+```{r}
+shinyApp(ui = ui, server = server)
+
+```
+
+
